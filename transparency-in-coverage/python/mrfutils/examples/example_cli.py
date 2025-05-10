@@ -28,10 +28,25 @@ def process_single_npi(args):
     npi_name = Path(npi_file).stem
     out_dir = os.path.join(base_out_dir, npi_name)
     
-    # Import NPI filter from file
-    npi_filter = import_csv_to_set(npi_file)
-    
     try:
+        # Import NPI filter from file and convert to proper format
+        raw_npi_set = import_csv_to_set(npi_file)
+        # Extract just the NPI numbers from tuples if present, or use the raw value if it's not a tuple
+        npi_filter = set()
+        for item in raw_npi_set:
+            if isinstance(item, tuple):
+                # If it's a tuple, take the first element (assuming NPI is first)
+                npi = str(item[0])
+            else:
+                # If it's not a tuple, use the value directly
+                npi = str(item)
+            try:
+                # Convert to integer and add to set
+                npi_filter.add(int(npi))
+            except ValueError:
+                log.warning(f"Skipping invalid NPI value: {npi}")
+                continue
+        
         in_network_file_to_csv(
             file=file,
             url=url,

@@ -83,17 +83,20 @@ def write_table(
 	file_loc = f'{out_dir}/{table_name}.csv'
 	file_exists = os.path.exists(file_loc)
 
-	# newline = '' is to prevent Windows
-	# from adding \r\n\n to the end of each line
-	with open(file_loc, 'a', newline = '') as f:
+	# newline = '' is to prevent Windows from adding \r\n\n
+	# buffering=1 for line buffering, which is more efficient for parallel writes
+	with open(file_loc, 'a', newline='', buffering=1) as f:
 		writer = csv.DictWriter(f, fieldnames=fieldnames)
 
 		if not file_exists:
 			writer.writeheader()
 
 		if isinstance(row_data, list):
-			writer.writerows(row_data)
-
+			# Write in chunks for better performance with large datasets
+			chunk_size = 1000
+			for i in range(0, len(row_data), chunk_size):
+				chunk = row_data[i:i + chunk_size]
+				writer.writerows(chunk)
 		elif isinstance(row_data, dict):
 			writer.writerow(row_data)
 
@@ -667,7 +670,8 @@ def in_network_file_to_csv(
 	assert validate_url(url)
 	make_dir(out_dir)
 
-	if file is None: file = url
+	if file is None: 
+		file = url
 
 	completed = False
 	ref_map = None
@@ -679,22 +683,18 @@ def in_network_file_to_csv(
 	file_row['url'] = url
 	file_id = file_row['id']
 
-	while True:
-		# This loop runs as long as there's a parser.
-		# We don't use
-		# >>> While parser
-		# since we occasionally create a new parser instance
-		# when the file is out of order.
+	# Use a buffer for batch processing
+	in_network_buffer = []
+	buffer_size = 100  # Adjust based on your memory constraints
 
-		# There are basically three cases we need to consider:
-		# 1. We hit the provider_references
-		# 2. We hit the in_network items
-		# 3. Everything else
+	while True:
 		try:
 			prefix, event, value = next(parser)
 		except StopIteration:
-			if completed: break
-			if ref_map is None: ref_map = {}
+			if completed: 
+				break
+			if ref_map is None: 
+				ref_map = {}
 			parser = start_parser(file)
 			ffwd(parser, to_prefix='', to_value='in_network')
 			prefix, event, value = ('', 'map_key', 'in_network')
@@ -703,11 +703,6 @@ def in_network_file_to_csv(
 		if value == 'provider_references':
 			ref_map = get_reference_map(parser, npi_filter)
 
-		# There are four things that need to come before in_network
-		# 1. reporting_entity_name
-		# 2. reporting_entity_type
-		# 3. provider_references
-		# 4. last_updated_on
 		elif value == 'in_network':
 			if ref_map is None:
 				ffwd(parser, to_prefix = 'in_network', to_event = 'end_array')
@@ -717,7 +712,16 @@ def in_network_file_to_csv(
 			swapped_items = swap_references(filtered_items, ref_map)
 
 			for item in process_in_network(swapped_items, npi_filter):
-				write_in_network_item(file_id, item, out_dir)
+				in_network_buffer.append(item)
+				if len(in_network_buffer) >= buffer_size:
+					for buffered_item in in_network_buffer:
+						write_in_network_item(file_id, buffered_item, out_dir)
+					in_network_buffer.clear()
+
+			# Process remaining items in buffer
+			for buffered_item in in_network_buffer:
+				write_in_network_item(file_id, buffered_item, out_dir)
+			in_network_buffer.clear()
 
 			completed = True
 

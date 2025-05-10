@@ -10,42 +10,73 @@ line argument to do that.
 import argparse
 import logging
 import os
-from multiprocessing import Pool
+import csv
+from multiprocessing import Pool, cpu_count
 from pathlib import Path
+import time
 
 from mrfutils.helpers import import_csv_to_set
 from mrfutils.flatteners import in_network_file_to_csv
 
-logging.basicConfig()
-log = logging.getLogger('mrfutils')
-log.setLevel(logging.DEBUG)
+def setup_logger(npi_file):
+    """Setup a separate logger for each process"""
+    logger = logging.getLogger(f'mrfutils_{os.getpid()}')
+    logger.setLevel(logging.INFO)
+    
+    # Create file handler
+    log_dir = "logs"
+    os.makedirs(log_dir, exist_ok=True)
+    fh = logging.FileHandler(os.path.join(log_dir, f"{Path(npi_file).stem}.log"))
+    fh.setLevel(logging.INFO)
+    
+    # Create console handler
+    ch = logging.StreamHandler()
+    ch.setLevel(logging.INFO)
+    
+    # Create formatter
+    formatter = logging.Formatter('%(asctime)s - %(message)s')
+    fh.setFormatter(formatter)
+    ch.setFormatter(formatter)
+    
+    # Add handlers
+    logger.addHandler(fh)
+    logger.addHandler(ch)
+    
+    return logger
+
+def import_npis_from_csv(file_path):
+    """Import NPIs from CSV file, skipping header"""
+    npi_set = set()
+    with open(file_path, 'r') as f:
+        # Skip header row
+        next(f)
+        for line in f:
+            try:
+                # Assuming NPI is the first column
+                npi = line.strip().split(',')[0]
+                if npi.isdigit():  # Only process if it's a valid number
+                    npi_set.add(int(npi))
+            except (ValueError, IndexError):
+                continue
+    return npi_set
 
 def process_single_npi(args):
     """Process a single NPI file with the given parameters"""
     npi_file, file, url, code_filter, base_out_dir = args
     
-    # Create a unique output directory for this NPI file
-    npi_name = Path(npi_file).stem
-    out_dir = os.path.join(base_out_dir, npi_name)
+    # Setup logger for this process
+    logger = setup_logger(npi_file)
+    logger.info(f"Starting processing of {npi_file}")
+    start_time = time.time()
     
     try:
-        # Import NPI filter from file and convert to proper format
-        raw_npi_set = import_csv_to_set(npi_file)
-        # Extract just the NPI numbers from tuples if present, or use the raw value if it's not a tuple
-        npi_filter = set()
-        for item in raw_npi_set:
-            if isinstance(item, tuple):
-                # If it's a tuple, take the first element (assuming NPI is first)
-                npi = str(item[0])
-            else:
-                # If it's not a tuple, use the value directly
-                npi = str(item)
-            try:
-                # Convert to integer and add to set
-                npi_filter.add(int(npi))
-            except ValueError:
-                log.warning(f"Skipping invalid NPI value: {npi}")
-                continue
+        # Create a unique output directory for this NPI file
+        npi_name = Path(npi_file).stem
+        out_dir = os.path.join(base_out_dir, npi_name)
+        
+        # Import NPI filter from file
+        npi_filter = import_npis_from_csv(npi_file)
+        logger.info(f"Loaded {len(npi_filter)} valid NPIs from {npi_file}")
         
         in_network_file_to_csv(
             file=file,
@@ -54,8 +85,14 @@ def process_single_npi(args):
             code_filter=code_filter,
             out_dir=out_dir
         )
+        
+        end_time = time.time()
+        logger.info(f"Completed processing {npi_file} in {end_time - start_time:.2f} seconds")
+        return True
+        
     except Exception as e:
-        log.error(f"Error processing {npi_file}: {str(e)}")
+        logger.error(f"Error processing {npi_file}: {str(e)}")
+        return False
 
 parser = argparse.ArgumentParser()
 parser.add_argument('-f', '--file')
@@ -64,6 +101,8 @@ parser.add_argument('-o', '--out-dir', default='csv_output')
 parser.add_argument('-c', '--code-file')
 parser.add_argument('-n', '--npi-files', nargs='+', required=True,
                     help='One or more NPI filter files to process in parallel')
+parser.add_argument('-p', '--processes', type=int, default=None,
+                    help='Number of parallel processes to use. Defaults to CPU count.')
 
 args = parser.parse_args()
 
@@ -83,6 +122,15 @@ process_args = [
 
 # Use multiprocessing to process NPI files in parallel
 if __name__ == '__main__':
-    # Use number of CPUs available for parallel processing
-    with Pool() as pool:
-        pool.map(process_single_npi, process_args)
+    num_processes = args.processes or max(1, cpu_count() - 1)  # Leave one CPU free
+    print(f"Starting processing with {num_processes} parallel processes")
+    
+    with Pool(processes=num_processes) as pool:
+        results = pool.map(process_single_npi, process_args)
+    
+    successful = sum(1 for r in results if r)
+    failed = len(results) - successful
+    print(f"\nProcessing completed:")
+    print(f"- Successfully processed: {successful} files")
+    print(f"- Failed to process: {failed} files")
+    print(f"- Total files: {len(results)} files")

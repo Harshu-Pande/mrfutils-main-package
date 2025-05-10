@@ -50,6 +50,7 @@ class JSONOpen:
 		self.f = None
 		self.r = None
 		self.is_remote = None
+		self.buffer_size = 65536  # 64KB buffer
 
 		parsed_url = urlparse(self.filename)
 		self.suffix = ''.join(Path(parsed_url.path).suffixes)
@@ -65,31 +66,31 @@ class JSONOpen:
 		self.is_remote = parsed_url.scheme in ('http', 'https')
 
 	def __enter__(self):
-		if (
-			self.is_remote
-			# endswith is used to protect against the case
-			# where the filename contains lots of dots
-			# insurer.stuff.json.gz
-			and self.suffix.endswith('.json.gz')
-		):
+		if self.is_remote:
 			self.s = requests.Session()
+			# Configure session for better performance
+			self.s.headers.update({'Accept-Encoding': 'gzip, deflate'})
+			adapter = requests.adapters.HTTPAdapter(
+				pool_connections=100,
+				pool_maxsize=100,
+				max_retries=3,
+				pool_block=False
+			)
+			self.s.mount('http://', adapter)
+			self.s.mount('https://', adapter)
+			
 			self.r = self.s.get(self.filename, stream=True)
-			self.f = gzip.GzipFile(fileobj=self.r.raw)
-
-		elif (
-			self.is_remote
-			and self.suffix.endswith('.json')
-		):
-			self.s = requests.Session()
-			self.r = self.s.get(self.filename, stream=True)
-			self.r.raw.decode_content = True
-			self.f = self.r.raw
-
-		elif self.suffix == '.json.gz':
-			self.f = gzip.open(self.filename, 'rb')
-
+			
+			if self.suffix.endswith('.json.gz'):
+				self.f = gzip.GzipFile(fileobj=self.r.raw)
+			else:
+				self.r.raw.decode_content = True
+				self.f = self.r.raw
 		else:
-			self.f = open(self.filename, 'rb')
+			if self.suffix.endswith('.json.gz'):
+				self.f = gzip.open(self.filename, 'rb', buffering=self.buffer_size)
+			else:
+				self.f = open(self.filename, 'rb', buffering=self.buffer_size)
 
 		log.info(f'Opened file: {self.filename}')
 		return self.f
@@ -98,7 +99,6 @@ class JSONOpen:
 		if self.is_remote:
 			self.s.close()
 			self.r.close()
-
 		self.f.close()
 
 
@@ -106,22 +106,33 @@ def import_csv_to_set(filename: str):
 	"""Imports data as tuples from a given file."""
 	items = set()
 
-	with open(filename, 'r') as f:
+	# Use a larger buffer size for better performance
+	with open(filename, 'r', buffering=65536) as f:
+		# Skip header row
+		next(f, None)
+		
 		reader = csv.reader(f)
 		for row in reader:
-			row = [col.strip() for col in row]
+			if not row:  # Skip empty rows
+				continue
+			row = [col.strip() for col in row if col.strip()]  # Skip empty columns
+			if not row:  # Skip if all columns were empty
+				continue
+			
 			if len(row) > 1:
 				items.add(tuple(row))
 			else:
-				item = row.pop()
-				items.add(item)
+				item = row[0]
+				if item.isdigit():  # Only add if it's a valid number
+					items.add(int(item))
+				else:
+					items.add(item)
 		return items
 
 
 def make_dir(out_dir):
-
-	if not os.path.exists(out_dir):
-		os.mkdir(out_dir)
+	"""Create directory if it doesn't exist"""
+	os.makedirs(out_dir, exist_ok=True)  # More efficient than checking then creating
 
 
 def dicthasher(data: dict, n_bytes = 8) -> int:
